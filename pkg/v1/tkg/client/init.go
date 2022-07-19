@@ -415,6 +415,14 @@ func (c *TkgClient) PatchClusterInitOperations(regionalClusterClient clusterclie
 		return errors.Wrap(err, "unable to patch optional metadata under labels")
 	}
 
+	if config.IsFeatureActivated(config.FeatureFlagPackageBasedLCM) {
+		// Patch and remove kapp-controller labels from clusterclass resources
+		_, err = regionalClusterClient.RemoveKappControllerLabelsFromClusterClassResources(options.ClusterName, targetClusterNamespace)
+		if err != nil {
+			return errors.Wrap(err, "unable to patch optional metadata under labels")
+		}
+	}
+
 	return err
 }
 
