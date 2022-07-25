@@ -2851,6 +2851,58 @@ prod.repo.com: prod.custom.repo.com`
 		})
 	})
 
+	FDescribe("RemoveMatchingLabelsFromResources", func() {
+		var (
+			fakeClientSet crtclient.Client
+		)
+		BeforeEach(func() {
+			reInitialize()
+
+			fakeClientSet = fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(
+				&capi.ClusterClass{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "fake-clusterclass",
+						Namespace: "fake-namespace",
+						Labels: map[string]string{
+							"key-foo": "value-foo",
+							"key-bar": "value-bar",
+						},
+					},
+					Spec: capi.ClusterClassSpec{
+						Variables: []capi.ClusterClassVariable{
+							{Name: "fake-variable"},
+						},
+					},
+				},
+			).Build()
+			crtClientFactory.NewClientReturns(fakeClientSet, nil)
+
+			clusterClientOptions = NewOptions(poller, crtClientFactory, discoveryClientFactory, nil)
+			kubeConfigPath := getConfigFilePath("config1.yaml")
+			clstClient, err = NewClient(kubeConfigPath, "", clusterClientOptions)
+			Expect(err).NotTo(HaveOccurred())
+		})
+
+		Context("When matching objects and labels are found", func() {
+			It("should remove the labels from the objects", func() {
+				err = clstClient.RemoveMatchingLabelsFromResources(&capi.ClusterClassList{}, "fake-namespace", []string{"key-foo"})
+				Expect(err).NotTo(HaveOccurred())
+
+				clusterClass := &capi.ClusterClass{}
+				err = clstClient.GetResource(clusterClass, "fake-clusterclass", "fake-namespace", nil, nil)
+				Expect(err).NotTo(HaveOccurred())
+
+				labels := clusterClass.GetLabels()
+				Expect(labels).To(HaveKey("key-bar"))
+				Expect(labels).NotTo(HaveKey("key-foo"))
+
+				Expect(len(clusterClass.Spec.Variables)).To(Equal(1))
+				Expect(clusterClass.Spec.Variables[0].Name).To(Equal("fake-variable"))
+
+			})
+		})
+	})
+
 })
 
 func createTempDirectory() {

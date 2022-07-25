@@ -33,6 +33,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/selection"
 	"k8s.io/apimachinery/pkg/types"
 	kerrors "k8s.io/apimachinery/pkg/util/errors"
@@ -333,8 +334,8 @@ type Client interface {
 	GetCLIPluginImageRepositoryOverride() (map[string]string, error)
 	// VerifyExistenceOfCRD returns true if CRD exists else return false
 	VerifyExistenceOfCRD(resourceName, resourceGroup string) (bool, error)
-	// Remove kapp-controller labels from clusterclass resources
-	RemoveKappControllerLabelsFromClusterClassResources(clusterName, namespace string) error
+	// RemoveMatchingLabelsFromResources removes matching labels for specified resource types
+	RemoveMatchingLabelsFromResources(resource crtclient.ObjectList, namespace string, labelsToBeDeleted []string) error
 }
 
 // PollOptions is options for polling
@@ -2432,52 +2433,44 @@ func (c *client) IsClusterClassBased(clusterName, namespace string) (bool, error
 	return true, nil
 }
 
-func (c *client) CheckCRDPresence(resourceName, group string) (bool, error) {
-	// Since we're looking up API types via discovery, we don't need the dynamic client.
-	clusterQueryClient, err := capdiscovery.NewClusterQueryClient(c.dynamicClient, c.discoveryClient)
+func (c *client) RemoveMatchingLabelsFromResources(resource crtclient.ObjectList, namespace string, labelsToBeDeleted []string) error {
+	err := c.ListResources(resource, &crtclient.ListOptions{Namespace: namespace})
 	if err != nil {
-		return false, err
+		return err
 	}
 
-	var queryObject = capdiscovery.Group(resourceName, group).WithResource(resourceName)
-
-	// Build query client.
-	cqc := clusterQueryClient.Query(queryObject)
-
-	// Execute returns combined result of all queries.
-	return cqc.Execute() // return (found, err) response
-
-}
-
-// RemoveKappControllerLabelsFromClusterClassResources removes kapp-controller labels from clusterclass resources
-func (c *client) RemoveKappControllerLabelsFromClusterClassResources(clusterName, namespace string) error {
-	var errList []error
-
-	ClusterClassResources := []crtclient.ObjectList{
-		&capi.ClusterClassList{},
-		&controlplanev1.KubeadmControlPlaneTemplateList{},
-		&bootstrapv1.KubeadmConfigTemplateList{},
-		&capav1beta1.AWSClusterTemplateList{},
-		&capav1beta1.AWSMachineTemplateList{},
-		&capzv1beta1.AzureClusterTemplateList{},
-		&capzv1beta1.AzureMachineTemplateList{},
-		&capvv1beta1.VSphereClusterTemplateList{},
-		&capvv1beta1.VSphereMachineTemplateList{},
+	objList, err := runtime.DefaultUnstructuredConverter.ToUnstructured(resource)
+	if err != nil {
+		return err
 	}
 
-	for _, resource := range ClusterClassResources {
-		if exists, err := c.CheckCRDPresence(resource.GetObjectKind().GroupVersionKind().Kind, resource.GetObjectKind().GroupVersionKind().Group); err != nil || !exists {
-			continue
+	items, exists := objList["items"]
+	if items == nil || !exists {
+		return nil
+	}
+
+	for _, item := range items.([]interface{}) {
+		unstructuredObj := item.(map[string]interface{})
+		obj := &unstructured.Unstructured{}
+		err := runtime.DefaultUnstructuredConverter.FromUnstructured(unstructuredObj, obj)
+
+		obj.SetGroupVersionKind(schema.GroupVersionKind{
+			Group:   resource.GetObjectKind().GroupVersionKind().Group,
+			Kind:    strings.TrimSuffix(resource.GetObjectKind().GroupVersionKind().Kind, "List"),
+			Version: resource.GetObjectKind().GroupVersionKind().Version,
+		})
+
+		labels := obj.GetLabels()
+		for _, key := range labelsToBeDeleted {
+			delete(labels, key)
 		}
 
-		err := c.ListResources(resource, &crtclient.ListOptions{Namespace: constants.TkgNamespace})
+		obj.SetLabels(labels)
+		err = c.UpdateResource(obj, obj.GetName(), obj.GetNamespace())
 		if err != nil {
-			errList = append(errList, err)
-			continue
+			return errors.Wrap(err, "error while updating labels")
 		}
-
 	}
-
 	return nil
 }
 
